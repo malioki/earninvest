@@ -1,0 +1,99 @@
+{
+  "_comment": "Sample data. Copy to finance.json and replace with your own. Real data files are gitignored.",
+  "snapshotDate": "2026-01-15",
+  "mdlPerUsd": 17.8,
+  "rubPerUsd": 16.3,
+  "monthlyIncomeUsd": 3000,
+  "monthlyIncomeNote": "Salary + side work",
+  "monthlyLifeCostUsd": 900,
+  "passiveIncomeGoalUsdPerMonth": 300,
+  "credits": [
+    {
+      "id": "example-toxic",
+      "name": "High-interest loan",
+      "currency": "USD",
+      "balance": 4000,
+      "monthlyPayment": 200,
+      "aprPct": 42,
+      "priority": 1,
+      "note": "Pay this off first — the rate dwarfs anything you can earn."
+    },
+    {
+      "id": "example-bank",
+      "name": "Bank loan",
+      "currency": "USD",
+      "balance": 9000,
+      "monthlyPayment": 260,
+      "aprPct": 11,
+      "priority": 2,
+      "note": "Below the Earn threshold — do not prepay."
+    }
+  ],
+  "personalDebts": [
+    {
+      "name": "Friend A",
+      "amountUsd": 500,
+      "currency": "USD",
+      "originalAmount": 500,
+      "priority": 1,
+      "due": "10 марта 2026"
+    },
+    {
+      "name": "Friend B",
+      "amountUsd": 300,
+      "currency": "USD",
+      "originalAmount": 300,
+      "priority": 2
+    }
+  ],
+  "owedToMe": [
+    {
+      "name": "Someone who owes you",
+      "amountUsd": 250,
+      "note": "Expected back next month"
+    }
+  ],
+  "liquidAssets": [
+    {
+      "name": "Cash",
+      "amountUsd": 1200,
+      "role": "buffer"
+    },
+    {
+      "name": "Earn portfolio",
+      "amountUsd": 0,
+      "note": "Empty until the toxic debt is gone",
+      "role": "buffer"
+    },
+    {
+      "name": "Car",
+      "amountUsd": 15000,
+      "note": "Net worth, not spendable — role 'reserve' keeps it out of free cash",
+      "role": "reserve"
+    }
+  ],
+  "earmarks": [
+    {
+      "name": "Reserved for a known upcoming bill",
+      "amountUsd": 400,
+      "due": "март 2026"
+    }
+  ],
+  "milestones": [
+    {
+      "id": "personal-debts",
+      "label": "Close personal debts",
+      "done": false
+    },
+    {
+      "id": "toxic-credit",
+      "label": "Close the high-interest loan",
+      "done": false
+    },
+    {
+      "id": "passive-300",
+      "label": "$300/month passive income",
+      "done": false
+    }
+  ]
+}
