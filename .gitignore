@@ -1,6 +1,17 @@
 node_modules/
 dist/
-.env
-data/*.json
-!data/finance.example.json
 *.log
+
+# Secrets — only .env.example is tracked
+.env
+
+# Family money, receipts, debts: personal data, never in git — only the samples
+data/*
+!data/*.example.json
+
+# Not part of the app (CV, one-off calculators, session dumps)
+cv/
+CV-draft.md
+*.pdf
+calc-12k.*
+.transcript-tail.txt

@@ -1,10 +1,13 @@
 import "dotenv/config";
 import { config } from "./config/index.js";
 import { logger } from "./utils/logger.js";
-import { startWebServer } from "./web/index.js";
-import { startScheduler } from "./scheduler/index.js";
-import { getTelegramBot } from "./telegram/index.js";
+import { startEarnWebServer } from "./web/earn.js";
+import { startEarnScheduler } from "./scheduler/earn.js";
 import type { IExchangeAdapter } from "./exchanges/IExchangeAdapter.js";
+
+// Crypto Earn optimizer: exchange adapters, rebalancing scheduler, its own
+// dashboard on EARN_PORT. Notifications go out send-only; the Telegram bot
+// itself (polling) belongs to the family app — see src/family.ts.
 
 // ── Adapter selection ─────────────────────────────────────────────────────
 async function createAdapters(): Promise<IExchangeAdapter[]> {
@@ -35,18 +38,15 @@ async function createAdapters(): Promise<IExchangeAdapter[]> {
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────
 async function main() {
-  logger.info("=== EarnOptimizer starting ===");
+  logger.info("=== Earn optimizer starting ===");
 
   const adapters = await createAdapters();
 
   // Start background scheduler (also runs once immediately)
-  const { runCheck } = startScheduler(adapters);
+  const { runCheck } = startEarnScheduler(adapters);
 
   // Start web dashboard with refresh callback
-  startWebServer(runCheck);
-
-  // Init telegram (optional — only if configured)
-  getTelegramBot();
+  startEarnWebServer(runCheck);
 }
 
 main().catch((err) => {

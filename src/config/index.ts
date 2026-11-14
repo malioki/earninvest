@@ -34,11 +34,37 @@ export const config = {
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean),
+    /**
+     * Who sees debts and the payment calendar, and gets the family digests and
+     * payment reminders. Defaults to everyone in ALLOWED_IDS (the family);
+     * set TELEGRAM_FINANCE_IDS to narrow it.
+     */
+    financeIds: (process.env.TELEGRAM_FINANCE_IDS ?? process.env.TELEGRAM_ALLOWED_IDS ?? process.env.TELEGRAM_CHAT_ID ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+    /** Always get the weekly data/ backup, besides whoever sent /backup. */
+    backupIds: (process.env.TELEGRAM_BACKUP_IDS ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
   },
 
   scheduler: {
     checkCron: process.env.CHECK_CRON ?? "0 */6 * * *",
     reportCron: process.env.REPORT_CRON ?? "0 9 * * *",
+    /** Spending digest for the week that just ended (Mon–Sun). Monday 09:10. */
+    weeklySpendingCron: process.env.WEEKLY_SPENDING_CRON ?? "10 9 * * 1",
+    /** Last month vs. budget. The 1st, 09:15. */
+    monthlySpendingCron: process.env.MONTHLY_SPENDING_CRON ?? "15 9 1 * *",
+    /** Evening reminder about tomorrow's credit payments. 19:00 daily. */
+    paymentReminderCron: process.env.PAYMENT_REMINDER_CRON ?? "0 19 * * *",
+    /** Official FX rates (BNM, PRB) → finance.json. 10:30 daily. */
+    ratesCron: process.env.RATES_CRON ?? "30 10 * * *",
+    /** Portfolio reminders (15th, quarterly transfer, yearly review). Checked daily at 10:00. */
+    portfolioReminderCron: process.env.PORTFOLIO_REMINDER_CRON ?? "0 10 * * *",
+    /** data/ zipped to /backup subscribers. Sunday 21:00. */
+    backupCron: process.env.BACKUP_CRON ?? "0 21 * * 0",
   },
 
   optimizer: {
@@ -91,8 +117,23 @@ export const config = {
     .split(",")
     .map((s) => s.trim().toUpperCase()),
 
+  /** Family app: finances, spending, shopping lists, Telegram bot. */
   web: {
     port: Number(process.env.PORT ?? 3000),
+    /** Where the family pages live — the Earn dashboard links back here. */
+    url: process.env.FAMILY_URL ?? `http://localhost:${process.env.PORT ?? 3000}`,
+  },
+
+  /**
+   * Crypto Earn optimizer — a separate process with its own dashboard.
+   * Defaults to the family port + 1 so the two never collide (PORT=3001 in
+   * .env would otherwise put both on 3001).
+   */
+  earn: {
+    port: Number(process.env.EARN_PORT ?? Number(process.env.PORT ?? 3000) + 1),
+    url:
+      process.env.EARN_URL ??
+      `http://localhost:${process.env.EARN_PORT ?? Number(process.env.PORT ?? 3000) + 1}`,
   },
 
   dataDir: "./data",

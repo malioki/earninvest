@@ -1,0 +1,19 @@
+# docker compose up -d --build   — start (and restart with Docker Desktop after a reboot)
+# docker compose logs -f family  — watch the bot
+# Only one copy of the bot may run: stop `npm run dev` before starting this one,
+# or Telegram answers both with 409 Conflict.
+
+services:
+  family:
+    build: .
+    container_name: earninvest-family
+    env_file: .env
+    environment:
+      - TZ=Europe/Chisinau
+    volumes:
+      # Family money stays on this PC, outside the image and outside git.
+      - ./data:/app/data
+    ports:
+      # Family pages on this PC only. For a phone on the home Wi-Fi, drop "127.0.0.1:".
+      - "127.0.0.1:${PORT:-3000}:${PORT:-3000}"
+    restart: unless-stopped

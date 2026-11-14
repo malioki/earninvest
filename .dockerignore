@@ -1,0 +1,10 @@
+node_modules
+dist
+data
+.env
+.git
+cv
+CV-draft.md
+*.pdf
+calc-12k.*
+.transcript-tail.txt

@@ -1,3 +1,4 @@
+import { config } from "../config/index.js";
 import type {
   FinanceMetrics,
   CreditWithMetrics,
@@ -9,6 +10,15 @@ import {
   buildPayoffPlan,
 } from "../finance/index.js";
 import type { FinanceSnapshot } from "../finance/snapshots.js";
+import { overdueNow } from "../finance/actions.js";
+import { restOfMonth } from "../finance/plan.js";
+import { todayLocal } from "../spending/index.js";
+
+/** The payoff plan with the current month taken from the cash in hand, not the full flow. */
+function payoffPlan(metrics: FinanceMetrics) {
+  const r = restOfMonth(metrics.data, todayLocal());
+  return buildPayoffPlan(metrics, r ? { thisMonthUsd: r.freeUsd } : {});
+}
 
 const fmt = (n: number, d = 0): string =>
   n.toLocaleString("en-US", {
@@ -115,7 +125,7 @@ function renderCreditsTable(metrics: FinanceMetrics): string {
           : `${months.toFixed(1)} мес`;
       return `
         <tr ${isNext ? 'style="background:rgba(255,107,107,0.08)"' : ""}>
-          <td>${isNext ? "🎯 " : ""}<b>${c.name}</b>${c.note ? `<div style="font-size:.75rem;color:#888;margin-top:4px">${c.note}</div>` : ""}</td>
+          <td>${isNext ? "🎯 " : ""}<b>${c.name}</b>${c.overdue ? `<div style="font-size:.8rem;color:#ff6b6b;margin-top:4px">🔴 Просрочка ~${Math.round(overdueNow(c.overdue)).toLocaleString("ru-RU")} ${c.currency} на сегодня${c.overdue.note ? ` — ${escapeHtml(c.overdue.note)}` : ""}</div>` : ""}${c.note ? `<div style="font-size:.75rem;color:#888;margin-top:4px">${c.note}</div>` : ""}</td>
           <td>$${fmt(c.balanceUsd)}<div style="font-size:.75rem;color:#666">${fmt(c.balance)} ${c.currency}</div></td>
           <td style="color:${aprColor};font-weight:700">${c.aprPct.toFixed(2)}%</td>
           <td>$${fmt(c.monthlyPaymentUsd)}<div style="font-size:.75rem;color:#666">${fmt(c.monthlyPayment)} ${c.currency}</div></td>
@@ -408,25 +418,86 @@ function renderAssetsAndDebts(metrics: FinanceMetrics): string {
   </script>`;
 }
 
+/**
+ * When each milestone should land, as a month offset from now. Debt targets
+ * come from the live payoff plan; capital targets from the debt-free month,
+ * the post-debt flow and 8%/year — so they move as the plan does.
+ */
+function milestoneOffsets(metrics: FinanceMetrics): Map<string, number> {
+  const plan = payoffPlan(metrics);
+  const now = new Date();
+  const debtFree = plan.totalMonths - 1;              // last month with debt payments
+  const r = 0.08 / 12;
+  const pmt = plan.finalFlowUsd;
+  const capitalMonths = (target: number): number =>
+    Math.ceil(Math.log(1 + (target * r) / pmt) / Math.log(1 + r));
+  const out = new Map<string, number>();
+  for (const m of metrics.data.milestones) {
+    let off: number | undefined;
+    if (m.target) {
+      const [y, mo] = m.target.split("-").map(Number);
+      off = (y! - now.getFullYear()) * 12 + (mo! - 1 - now.getMonth());
+    } else if (m.planTargets) {
+      const ends = plan.phases
+        .filter((p) => m.planTargets!.some((t) => (t === "personal" ? p.kind === "personal" : p.target.startsWith(t))))
+        .map((p) => p.endOffset);
+      if (ends.length > 0) off = Math.max(...ends);
+    } else if (m.afterDebtsMonths !== undefined) {
+      off = debtFree + m.afterDebtsMonths;
+    } else if (pmt > 0 && (m.capitalUsd || m.capitalRule === "crossover")) {
+      // Saving starts the month after the last debt payment.
+      off = debtFree + (m.capitalRule === "crossover" ? Math.ceil(Math.log(2) / Math.log(1 + r)) : capitalMonths(m.capitalUsd!));
+    }
+    if (off !== undefined) out.set(m.id, off);
+  }
+  return out;
+}
+
 function renderMilestones(metrics: FinanceMetrics): string {
   const total = metrics.data.milestones.length;
   const done = metrics.data.milestones.filter((m) => m.done).length;
   const pct = total ? Math.round((done / total) * 100) : 0;
+  const offsets = milestoneOffsets(metrics);
+  const now = new Date();
+  const birth = parseBirth(metrics.data.birthDate);
+  const MONTHS = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
+  const when = (off: number): string => {
+    const d = new Date(now.getFullYear(), now.getMonth() + off, 1);
+    const age = birth ? d.getFullYear() - birth.year - (d.getMonth() < birth.month ? 1 : 0) : null;
+    const years = (n: number): string =>
+      n % 10 === 1 && n % 100 !== 11 ? "год" : [2, 3, 4].includes(n % 10) && ![12, 13, 14].includes(n % 100) ? "года" : "лет";
+    return `${MONTHS[d.getMonth()]} ${d.getFullYear()}${age !== null ? ` · ${age} ${years(age)}` : ""}`;
+  };
+  let stage: string | undefined;
   const items = metrics.data.milestones
-    .map(
-      (
-        m,
-      ) => `<div class="ms-row" data-id="${m.id}" style="display:flex;align-items:center;padding:8px 0;border-bottom:1px solid #2a2d37;cursor:pointer;user-select:none" onclick="toggleMilestone(this)">
+    .map((m) => {
+      const head = m.stage && m.stage !== stage
+        ? `<div style="margin:16px 0 4px;color:#64b5f6;font-weight:700;font-size:.9rem">${escapeHtml(m.stage)}</div>`
+        : "";
+      stage = m.stage ?? stage;
+      const off = offsets.get(m.id);
+      const late = !m.done && off !== undefined && off < 0;
+      const due = off === undefined || m.done ? "" :
+        `<div title="${late ? "срок прошёл" : "ожидаемый срок"}" style="font-size:.8rem;white-space:nowrap;margin-left:12px;color:${late ? "#ff6b6b" : off <= 2 ? "#ffc107" : "#64b5f6"}">${late ? "⚠️ " : ""}${when(off)}</div>`;
+      return `${head}<div class="ms-row" data-id="${m.id}" style="display:flex;align-items:center;padding:8px 0;border-bottom:1px solid #2a2d37;cursor:pointer;user-select:none" onclick="toggleMilestone(this)">
       <div class="ms-icon" style="font-size:1.4rem;margin-right:12px;width:28px;text-align:center">${m.done ? "✅" : "⬜"}</div>
-      <div class="ms-label" style="flex:1;${m.done ? "color:#4caf82;text-decoration:line-through" : "color:#ddd"}">${escapeHtml(m.label)}</div>
-    </div>`,
-    )
+      <div style="flex:1;min-width:0">
+        <div class="ms-label" style="${m.done ? "color:#4caf82;text-decoration:line-through" : "color:#ddd"}">${escapeHtml(m.label)}</div>
+        ${m.note && !m.done ? `<div style="font-size:.75rem;color:#777">${escapeHtml(m.note)}</div>` : ""}
+      </div>
+      ${due}
+    </div>`;
+    })
     .join("");
   return `
   <div class="section">
     <h3 style="margin-bottom:12px;color:#4caf82">🎯 Майлстоуны (<span id="ms-done">${done}</span>/<span id="ms-total">${total}</span> = <span id="ms-pct">${pct}</span>%)</h3>
     <div style="background:#1a1d27;border-radius:6px;height:8px;margin-bottom:16px;overflow:hidden">
       <div id="ms-bar" style="height:100%;width:${pct}%;background:linear-gradient(90deg,#4caf82,#66bb6a);transition:width .3s"></div>
+    </div>
+    <div style="color:#777;font-size:.8rem;margin-top:-6px">
+      Сроки по долгам — из плана погашения выше; по капиталу — с месяца после долгов, взнос $${fmt(payoffPlan(metrics).finalFlowUsd)}/мес под 8% годовых.
+      Сдвигаются сами, когда меняются платежи, доходы и траты. Нажми на строку — отметить выполненным.
     </div>
     ${items}
   </div>
@@ -517,7 +588,7 @@ function renderGoal(metrics: FinanceMetrics): string {
 }
 
 function renderSummary(metrics: FinanceMetrics): string {
-  const plan = buildPayoffPlan(metrics);
+  const plan = payoffPlan(metrics);
   const toxicCount = metrics.credits.filter(
     (c) => c.aprPct >= 30 && c.balance > 0,
   ).length;
@@ -693,7 +764,7 @@ function renderPlanInner(plan: AllocationPlan): string {
 }
 
 function renderPayoffPlan(metrics: FinanceMetrics): string {
-  const plan = buildPayoffPlan(metrics);
+  const plan = payoffPlan(metrics);
 
   if (plan.phases.length === 0) {
     return `
@@ -782,17 +853,28 @@ function renderPayoffPlan(metrics: FinanceMetrics): string {
     </table>
     ${goalBlock}
     <div style="margin-top:12px;color:#666;font-size:.8rem">
-      Расчёт консервативный: остатки кредитов берутся на сегодня и не уменьшаются на минимальные платежи по пути,
-      так что по факту закроется чуть раньше. Подработка $1 000 считается стабильной — если она просядет, сроки растянутся.
+      ${(() => {
+        const r = restOfMonth(metrics.data, todayLocal());
+        return r
+          ? `Текущий месяц — по факту: на руках $${fmt(r.cashUsd)} (на ${r.asOf.slice(8, 10)}.${r.asOf.slice(5, 7)}) + ещё придёт $${fmt(r.incomingUsd)} − кредиты, просрочки и платежи $${fmt(r.creditsUsd + r.overdueUsd + r.billsUsd)} − жизнь до конца месяца $${fmt(r.livingUsd)} = <b>$${fmt(Math.max(0, r.freeUsd))}</b> на долги. Сумму на руках обновляй в боте: 💼 Финансы → 💵 На руках.`
+          : "Сумма на руках не указана за этот месяц — текущий месяц посчитан полным потоком и, скорее всего, слишком оптимистично. Укажи её в боте: 💼 Финансы → 💵 На руках.";
+      })()}
+      Дальше — помесячно: каждый кредит копит проценты и получает минимальный платёж, остаток потока идёт первому в очереди.
+      Подработка считается стабильной — если она просядет, сроки растянутся.
     </div>
   </div>`;
+}
+
+function parseBirth(d?: string): { year: number; month: number; day: number } | null {
+  const m = d?.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? { year: Number(m[1]), month: Number(m[2]) - 1, day: Number(m[3]) } : null;
 }
 
 function renderCapitalGoals(
   metrics: FinanceMetrics,
   liveEarnApyPct: number,
 ): string {
-  const plan = buildPayoffPlan(metrics);
+  const plan = payoffPlan(metrics);
   const now = new Date();
   const cfg = {
     startOffset: plan.totalMonths,
@@ -801,6 +883,7 @@ function renderCapitalGoals(
     lifeAnnual: Math.round(metrics.data.monthlyLifeCostUsd * 12),
     contribution: Math.round(plan.finalFlowUsd),
     debtFreeLabel: plan.debtFreeLabel ?? "",
+    birth: parseBirth(metrics.data.birthDate),
   };
   const earnApy = liveEarnApyPct > 0 ? liveEarnApyPct : 8;
   const apySource =
@@ -865,6 +948,16 @@ function renderCapitalGoals(
       <div id="cgMilestones"></div>
     </div>
 
+    ${cfg.birth ? `
+    <div style="margin-top:18px">
+      <div style="color:#999;font-size:.9rem;margin-bottom:8px">🎂 К какому возрасту сколько — при тех же взносе и ставке:</div>
+      <div id="cgAges"></div>
+      <div style="color:#666;font-size:.75rem;margin-top:6px">
+        «Сегодняшними» — с поправкой на инфляцию 3%/год: сколько это стоило бы сейчас.
+        «Пассив» — проценты с капитала по той же ставке, сам капитал не тратится.
+      </div>
+    </div>` : ""}
+
     <div style="margin-top:14px;padding:11px;background:rgba(255,193,7,0.07);border-left:3px solid #ffc107;border-radius:4px;color:#bbb;font-size:.83rem">
       Суммы <b>номинальные</b>. При инфляции 3% миллион через 12 лет — это примерно $700k сегодняшними.
       И ни одна из этих ставок не гарантирована: крипто-доходность гуляет, у площадок есть риск неплатёжеспособности,
@@ -906,6 +999,37 @@ function renderCapitalGoals(
       var rb = parseFloat(document.getElementById('cgRateBroker').value) || 0;
       return w * re + (1 - w) * rb;
     }
+    // Capital at a birthday: monthly contributions from the debt-free month up
+    // to it, compounded monthly (FV of an annuity).
+    function cgAges(pmt, rate) {
+      var box = document.getElementById('cgAges');
+      if (!box || !CG.birth) return;
+      var r = rate / 100 / 12;
+      var html = '<table><thead><tr><th>Возраст</th><th>Когда</th><th>Копить</th><th>Капитал</th><th>Сегодняшними</th><th>Пассив/мес</th></tr></thead><tbody>';
+      [40, 45, 50, 55, 60].forEach(function (age) {
+        var at = (CG.birth.year + age - CG.baseYear) * 12 + (CG.birth.month - CG.baseMonth);
+        if (at < 0) return;   // already past this birthday
+        var n = at - CG.startOffset;
+        var when = CG_M[CG.birth.month] + ' ' + (CG.birth.year + age);
+        var hl = age === 50 ? 'background:rgba(100,181,246,0.10);' : '';
+        if (n <= 0) {
+          html += '<tr style="' + hl + '"><td>' + age + ' лет</td><td>' + when + '</td><td colspan="4" style="color:#888">ещё гасим долги</td></tr>';
+          return;
+        }
+        var fv = r > 0 ? pmt * (Math.pow(1 + r, n) - 1) / r : pmt * n;
+        var today = fv / Math.pow(1.03, at / 12);
+        var passive = fv * rate / 100 / 12;
+        html += '<tr style="' + hl + '">'
+          + '<td style="font-weight:700">' + age + ' лет' + (age === 50 ? ' 🎯' : '') + '</td>'
+          + '<td style="color:#888">' + when + '</td>'
+          + '<td style="color:#888">' + (n / 12).toFixed(1) + ' лет</td>'
+          + '<td style="color:#64b5f6;font-weight:700">$' + cgN(fv) + '<div style="font-size:.72rem;color:#777;font-weight:400">твоих $' + cgN(pmt * n) + '</div></td>'
+          + '<td>$' + cgN(today) + '</td>'
+          + '<td style="color:#4caf82">$' + cgN(passive) + '</td>'
+          + '</tr>';
+      });
+      box.innerHTML = html + '</tbody></table>';
+    }
     function cgCalc() {
       var target = parseFloat(document.getElementById('cgTarget').value) || 0;
       var pmt = parseFloat(document.getElementById('cgPmt').value) || 0;
@@ -914,6 +1038,7 @@ function renderCapitalGoals(
       document.getElementById('cgSplitLabelB').textContent = (100 - split) + '%';
 
       var rate = cgBlended();
+      cgAges(pmt, rate);
       var n = cgMonths(target, pmt, rate);
 
       var box = document.getElementById('cgResult');
@@ -1248,9 +1373,10 @@ export function renderFinancePage(
     <header>
       <h1>💼 Финансовая картина</h1>
       <nav>
-        <a href="/">📈 Earn</a>
+        <a href="${config.earn.url}" title="Крипто-оптимизатор — отдельное приложение (npm run dev:earn)">📈 Earn</a>
         <a href="/finance" class="active">💼 Финансы</a>
         <a href="/receipts">🧾 Чеки</a>
+        <a href="/shopping">🛒 Списки</a>
       </nav>
     </header>
     ${renderSummary(metrics)}

@@ -1,0 +1,15 @@
+{
+  "_comment": "Sample. Copy to portfolio.json and set your own cells, targets (sum to 1) and start date. Values are entered by hand from the broker / exchange.",
+  "model": "Example 60/30/10",
+  "start": "2026-01-15",
+  "bandPp": 5,
+  "cells": {
+    "stocks": { "label": "Stocks ETF (broker)", "target": 0.6, "value": 0 },
+    "bonds": { "label": "Bond ETF (broker)", "target": 0.3, "value": 0 },
+    "cash": { "label": "Cash", "target": 0.1, "value": 0 }
+  },
+  "ibkrCells": ["stocks", "bonds"],
+  "ibkrDirectMin": 250,
+  "envelope": 0,
+  "contributions": []
+}

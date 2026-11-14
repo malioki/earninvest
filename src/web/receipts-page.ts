@@ -1,3 +1,4 @@
+import { config } from "../config/index.js";
 import type {
   Receipt,
   ReceiptStats,
@@ -9,6 +10,9 @@ import type {
   Preset,
 } from "../expenses/index.js";
 import { CATEGORIES } from "../expenses/index.js";
+import type { MonthReport, WeekReport } from "../spending/index.js";
+import { rollupCategories } from "../spending/index.js";
+import { budgetVerdict, ordinalWeek } from "../spending/index.js";
 
 const fmt = (n: number, d = 0): string =>
   n.toLocaleString("en-US", {
@@ -42,6 +46,10 @@ const CAT_COLORS: Record<string, string> = {
   Хозтовары: "#90a4ae",
   Гигиена: "#b0bec5",
   Пакеты: "#607d8b",
+  Снеки: "#ffd54f",
+  Животные: "#8d6e63",
+  "Детское питание": "#f48fb1",
+  Аптека: "#4fc3f7",
   "Не разобрано": "#ffc107",
 };
 const catColor = (c: string): string => CAT_COLORS[c] ?? "#888";
@@ -56,6 +64,8 @@ const CASH_COLORS: Record<string, string> = {
   Детское: "#f06292",
   Подарки: "#ba68c8",
   Развлечения: "#9575cd",
+  Продукты: "#81c784",
+  "Дом и быт": "#78909c",
   Прочее: "#888",
 };
 const cashColor = (c: string): string =>
@@ -517,7 +527,7 @@ function renderOverview(
           return `<div style="color:#ff6b6b;font-size:.9rem">
             ⚠️ Тратишь на $${fmt(diff)}/мес больше, чем заложено в трекере
             ($${fmt(perMonth)} против $${fmt(lifeCostUsd)}). Свободный поток и все сроки в плане
-            завышены — стоит поднять <code>monthlyLifeCostUsd</code>.
+            завышены — стоит поднять <code>monthlyVariableBudgetUsd</code> и вместе с ним <code>monthlyLifeCostUsd</code>.
           </div>`;
         }
         return `<div style="color:#64b5f6;font-size:.9rem">
@@ -548,11 +558,245 @@ function renderOverview(
       <div>
         <div style="color:#999;font-size:.85rem;margin-bottom:5px">Темп в месяц</div>
         <div style="font-size:1.6rem;color:${enough ? "#fff" : "#555"};font-weight:700">${enough ? "$" + fmt(perMonth) : "—"}</div>
-        <div style="font-size:.75rem;color:#666">в трекере заложено $${fmt(lifeCostUsd)}</div>
+        <div style="font-size:.75rem;color:#666">переменная часть быта — $${fmt(lifeCostUsd)}</div>
       </div>
     </div>
     <div style="padding:11px;background:rgba(255,255,255,0.03);border-radius:6px">${verdict}</div>
   </div>`;
+}
+
+function deltaHtml(current: number, base: number): string {
+  if (base <= 0) return `<span style="color:#666">—</span>`;
+  // Rounded first so float noise on equal sums can't print "−0%".
+  const pct = Math.round(((current - base) / base) * 100);
+  // More spending is the bad direction here.
+  const color = Math.abs(pct) < 5 ? "#888" : pct > 0 ? "#ff6b6b" : "#4caf82";
+  return `<span style="color:${color}">${pct >= 0 ? "+" : "−"}${fmt(Math.abs(pct))}%</span>`;
+}
+
+function renderWeek(r: WeekReport, rub: number): string {
+  const s = r.summary;
+  const head = `
+    <h3 style="color:#4fc3f7;margin-bottom:2px">📅 Неделя ${esc(r.label)}</h3>
+    <div style="color:#888;font-size:.85rem;margin-bottom:14px">
+      ${esc(r.ofMonthLabel)}${r.isCurrent ? ` · идёт ${r.daysElapsed}-й день из 7 — сравнения неполные` : ""}
+    </div>`;
+
+  const maxHist = Math.max(...r.history.map((h) => h.totalUsd), 1);
+  const histBars = r.history
+    .map((h) => {
+      const isThis = h.start === r.start;
+      const pct = (h.totalUsd / maxHist) * 100;
+      return `
+      <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;min-width:0" title="${esc(h.label)}: $${fmt(h.totalUsd, 2)}">
+        <div style="font-size:.7rem;color:#888">${h.totalUsd > 0 ? "$" + fmt(h.totalUsd) : ""}</div>
+        <div style="width:100%;height:70px;display:flex;align-items:flex-end">
+          <div style="width:100%;height:${h.totalUsd > 0 ? Math.max(pct, 3).toFixed(1) : 0}%;background:${isThis ? "#4fc3f7" : "#3a5a70"};border-radius:3px 3px 0 0"></div>
+        </div>
+        <div style="font-size:.65rem;color:${isThis ? "#4fc3f7" : "#666"};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%">${esc(h.label)}</div>
+      </div>`;
+    })
+    .join("");
+  const history = `
+    <div style="margin-top:16px">
+      <div style="color:#999;font-size:.85rem;margin-bottom:6px">Последние ${r.history.length} недель
+        <span style="color:#666">· пустая неделя = ничего не записано, а не «ничего не потратили»</span></div>
+      <div style="display:flex;gap:6px;align-items:flex-end">${histBars}</div>
+    </div>`;
+
+  if (s.totalUsd === 0) {
+    return `
+    <div class="section" style="border-color:#4fc3f7">
+      ${head}
+      <div style="color:#888;font-size:.9rem">
+        📭 ${r.isCurrent ? "Пока" : "За эту неделю"} ничего не записано. Быстрее всего — на кассе:
+        камера на QR чека → ссылку боту в Telegram. Наличку — кнопками в боте.
+      </div>
+      ${history}
+    </div>`;
+  }
+
+  const prevByCat = new Map(r.previous.categories.map((c) => [c.category, c.totalUsd]));
+  const catRows = s.categories
+    .slice(0, 10)
+    .map((c) => {
+      const prev = prevByCat.get(c.category) ?? 0;
+      return `
+      <tr>
+        <td><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${cashColor(c.category)};margin-right:8px"></span>${esc(c.category)}</td>
+        <td>$${fmt(c.totalUsd, 2)}</td>
+        <td style="color:#888">${prev > 0 ? "$" + fmt(prev, 2) : "—"}</td>
+        <td>${prev > 0 ? deltaHtml(c.totalUsd, prev) : `<span style="color:#666">новое</span>`}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const stat = (label: string, value: string, sub: string, color = "#fff") => `
+      <div>
+        <div style="color:#999;font-size:.85rem;margin-bottom:5px">${label}</div>
+        <div style="font-size:1.5rem;color:${color};font-weight:700">${value}</div>
+        <div style="font-size:.75rem;color:#666">${sub}</div>
+      </div>`;
+
+  return `
+  <div class="section" style="border-color:#4fc3f7">
+    ${head}
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:18px;margin-bottom:16px">
+      ${stat("Потрачено", "$" + fmt(s.totalUsd), `~${fmt(s.totalUsd * rub)} руб ПМР`, "#4fc3f7")}
+      ${stat("Прошлая неделя", r.previous.totalUsd > 0 ? "$" + fmt(r.previous.totalUsd) : "—", r.previous.totalUsd > 0 ? `разница ${deltaHtml(s.totalUsd, r.previous.totalUsd)}` : "нет записей")}
+      ${stat("Обычная неделя", r.avgUsd !== null ? "$" + fmt(r.avgUsd) : "—", r.avgUsd !== null ? `среднее за ${r.avgWeeks} нед. · ${deltaHtml(s.totalUsd, r.avgUsd)}` : "мало истории")}
+      ${stat("Состав", `$${fmt(s.foodUsd)} / $${fmt(s.householdUsd)} / $${fmt(s.otherUsd)}`, `еда / хоз / остальное · ${s.receiptCount} чек. · ${s.cashCount} зап.`)}
+    </div>
+    <table>
+      <thead><tr><th>Категория</th><th>Эта неделя</th><th>Прошлая</th><th>Разница</th></tr></thead>
+      <tbody>${catRows}</tbody>
+    </table>
+    ${history}
+  </div>`;
+}
+
+function renderMonth(m: MonthReport, rub: number): string {
+  const s = m.summary;
+  const basis = m.isCurrent ? m.projectedUsd : s.totalUsd;
+  const v = basis !== null ? budgetVerdict(basis, m.budgetUsd) : null;
+  const vColor = !v ? "#888" : v.tone === "over" ? "#ff6b6b" : v.tone === "ok" ? "#4caf82" : "#64b5f6";
+  const usedPct = m.budgetUsd > 0 ? (s.totalUsd / m.budgetUsd) * 100 : 0;
+  const elapsedPct = (m.daysElapsed / m.daysInMonth) * 100;
+
+  const weekRows = m.weeks
+    .map(
+      (w) => `
+      <tr>
+        <td>${ordinalWeek(w.n)}</td>
+        <td style="color:#888">${esc(w.label)}</td>
+        <td>${w.totalUsd > 0 ? "$" + fmt(w.totalUsd, 2) : `<span style="color:#666">—</span>`}</td>
+      </tr>`,
+    )
+    .join("");
+
+  return `
+  <div class="section" style="border-color:#ba68c8">
+    <h3 style="color:#ba68c8;margin-bottom:2px">🗓 ${esc(m.label)}${m.isCurrent ? "" : " — итог"}</h3>
+    <div style="color:#888;font-size:.85rem;margin-bottom:14px">
+      Сравниваю с переменной частью быта ($${fmt(m.budgetUsd)}/мес) — аренда, коммуналка и телефоны в чеки не попадают.
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:18px;margin-bottom:14px">
+      <div>
+        <div style="color:#999;font-size:.85rem;margin-bottom:5px">Записано</div>
+        <div style="font-size:1.5rem;color:#ba68c8;font-weight:700">$${fmt(s.totalUsd)}</div>
+        <div style="font-size:.75rem;color:#666">~${fmt(s.totalUsd * rub)} руб · ${s.activeDays} дн. с записями</div>
+      </div>
+      <div>
+        <div style="color:#999;font-size:.85rem;margin-bottom:5px">${m.isCurrent ? "Темп на месяц" : "Итог месяца"}</div>
+        <div style="font-size:1.5rem;color:#fff;font-weight:700">${basis !== null ? "$" + fmt(basis) : "—"}</div>
+        <div style="font-size:.75rem;color:#666">${m.isCurrent ? (basis !== null ? `по ${m.daysElapsed} дн. из ${m.daysInMonth}` : "прогноз — с 7-го числа") : `${m.daysInMonth} дн.`}</div>
+      </div>
+      <div>
+        <div style="color:#999;font-size:.85rem;margin-bottom:5px">Бюджет</div>
+        <div style="font-size:1.5rem;color:#fff;font-weight:700">$${fmt(m.budgetUsd)}</div>
+        <div style="font-size:.75rem;color:${vColor}">${v ? esc(v.text) : "—"}</div>
+      </div>
+    </div>
+    <div style="position:relative;background:#1a1d27;border-radius:4px;height:12px;overflow:hidden;margin-bottom:4px">
+      <div style="height:100%;width:${Math.min(usedPct, 100).toFixed(1)}%;background:${usedPct > 100 ? "#ff6b6b" : "#ba68c8"}"></div>
+      ${m.isCurrent ? `<div title="Прошло ${fmt(elapsedPct)}% месяца" style="position:absolute;top:0;bottom:0;left:${elapsedPct.toFixed(1)}%;width:2px;background:#fff"></div>` : ""}
+    </div>
+    <div style="font-size:.75rem;color:#666;margin-bottom:14px">
+      Потрачено ${fmt(usedPct)}% бюджета${m.isCurrent ? ` · белая черта — прошло ${fmt(elapsedPct)}% месяца` : ""}
+    </div>
+    ${s.activeDays > 0 && s.activeDays < 7 ? `<div style="color:#ffc107;font-size:.85rem;margin-bottom:12px">⚠️ Записи только за ${s.activeDays} дн. — итог, скорее всего, неполный.</div>` : ""}
+    ${renderMonthCategories(m)}
+    <table>
+      <thead><tr><th>Неделя месяца</th><th>Даты</th><th>Потрачено</th></tr></thead>
+      <tbody>${weekRows}</tbody>
+    </table>
+  </div>`;
+}
+
+/** "2026-10-14" → "14.10". */
+const dayMonth = (d: string): string => `${d.slice(8, 10)}.${d.slice(5, 7)}`;
+
+// Colours of the month-chart buckets (see rollupCategories); plain categories keep theirs.
+const ROLLUP_COLORS: Record<string, string> = {
+  Продукты: "#81c784",
+  "Хозтовары и химия": "#90a4ae",
+  "Кафе и перекусы": "#ffb74d",
+};
+
+const bucketColor = (c: string): string => ROLLUP_COLORS[c] ?? cashColor(c);
+
+/** Where the month's money went: chequed items and cash together, vs the month before. */
+function renderMonthCategories(m: MonthReport): string {
+  const s = m.summary;
+  const cats = rollupCategories(s.categories, s.totalUsd).filter((c) => c.totalUsd >= 0.5);
+  if (cats.length === 0) return "";
+  const prevByCat = new Map(rollupCategories(m.previous.categories, m.previous.totalUsd).map((c) => [c.category, c.totalUsd]));
+  const hasPrev = m.previous.totalUsd > 0;
+  const max = cats[0]!.totalUsd;
+
+  // One stacked strip: the big categories in colour, the tail as one grey block.
+  const TOP = 8;
+  const top = cats.slice(0, TOP);
+  const restUsd = cats.slice(TOP).reduce((a, c) => a + c.totalUsd, 0);
+  const seg = (label: string, usd: number, color: string) => {
+    const pct = (usd / s.totalUsd) * 100;
+    return `<div title="${esc(label)}: $${fmt(usd, 2)} (${fmt(pct)}%)" style="width:${pct.toFixed(2)}%;background:${color};display:flex;align-items:center;justify-content:center;font-size:.7rem;color:#111;font-weight:700;overflow:hidden;white-space:nowrap">${pct >= 8 ? esc(label) : ""}</div>`;
+  };
+  const strip = `
+    <div style="display:flex;height:26px;border-radius:5px;overflow:hidden;margin-bottom:12px;background:#1a1d27">
+      ${top.map((c) => seg(c.category, c.totalUsd, bucketColor(c.category))).join("")}
+      ${restUsd > 0 ? seg(`Остальное (${cats.length - TOP})`, restUsd, "#555") : ""}
+    </div>`;
+
+  const row = (c: (typeof cats)[number]) => {
+    const prev = prevByCat.get(c.category) ?? 0;
+    const dot = `<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${bucketColor(c.category)};margin-right:8px"></span>`;
+    // A bucket made of several categories opens to show them: Продукты → Мясо, Молочка…
+    // Детское opens by kind instead, each with its purchases.
+    const parts = c.parts.filter((p) => p.totalUsd >= 0.5);
+    const line = (label: string, usd: number, strong = false) =>
+      `<div style="display:flex;justify-content:space-between;gap:12px;max-width:340px${strong ? ";color:#ddd" : ""}"><span>${label}</span><span>$${fmt(usd, 2)}</span></div>`;
+    const kids = c.category === "Детское" && m.kids.length > 0
+      ? m.kids.map((k) => `
+          <div style="margin-bottom:6px">
+            ${line(esc(k.kind), k.totalUsd, true)}
+            ${k.items.map((i) => `<div style="display:flex;justify-content:space-between;gap:12px;max-width:340px;padding-left:12px;color:#888;font-size:.75rem"><span>${dayMonth(i.date)} · ${esc(i.label)}</span><span>$${fmt(i.usd, 2)}</span></div>`).join("")}
+          </div>`).join("")
+      : "";
+    const name = kids || parts.length > 1 || (parts.length === 1 && parts[0]!.category !== c.category)
+      ? `<details><summary style="cursor:pointer">${dot}${esc(c.category)}</summary>
+          <div style="margin:6px 0 2px 18px;font-size:.8rem;color:#aaa;line-height:1.7">
+            ${kids || parts.map((p) => line(esc(p.category), p.totalUsd)).join("")}
+          </div></details>`
+      : `${dot}${esc(c.category)}`;
+    return `
+      <tr>
+        <td>${name}</td>
+        <td style="vertical-align:top">$${fmt(c.totalUsd, 2)}</td>
+        <td style="width:34%;vertical-align:top">
+          <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+            <div style="flex:1;background:#1a1d27;border-radius:3px;height:8px;overflow:hidden">
+              <div style="height:100%;width:${((c.totalUsd / max) * 100).toFixed(1)}%;background:${bucketColor(c.category)}"></div>
+            </div>
+            <span style="color:#888;font-size:.8rem;min-width:42px;text-align:right">${fmt(c.share * 100, 1)}%</span>
+          </div>
+        </td>
+        ${hasPrev ? `<td style="color:#888;vertical-align:top">${prev > 0 ? "$" + fmt(prev, 2) : "—"}</td>` : ""}
+      </tr>`;
+  };
+  const head = `<thead><tr><th>Категория <span style="text-transform:none;font-weight:400;color:#666">(нажми — подробно)</span></th><th>${m.isCurrent ? "Этот месяц" : "За месяц"}</th><th>Доля</th>${hasPrev ? "<th>Прошлый</th>" : ""}</tr></thead>`;
+  const SHOWN = 12;
+  const more = cats.length > SHOWN
+    ? `<details style="margin-top:6px"><summary style="cursor:pointer;color:#ba68c8;font-size:.85rem">Ещё ${cats.length - SHOWN} категорий</summary>
+        <table style="margin-top:6px">${head}<tbody>${cats.slice(SHOWN).map(row).join("")}</tbody></table></details>`
+    : "";
+  return `
+    <div style="margin-bottom:18px">
+      <div style="color:#999;font-size:.85rem;margin-bottom:6px">По категориям — чеки и наличка вместе</div>
+      ${strip}
+      <table>${head}<tbody>${cats.slice(0, SHOWN).map(row).join("")}</tbody></table>
+      ${more}
+    </div>`;
 }
 
 function renderCashBreakdown(cs: CashStats): string {
@@ -641,13 +885,18 @@ export function renderReceiptsPage(
     perDayUsd: 0,
   },
   presets: Preset[] = [],
-  lifeCostUsd = 0,
+  budgetUsd = 0,
+  week: WeekReport | null = null,
+  month: MonthReport | null = null,
+  rub = 16.3,
 ): string {
   const nothing = receipts.length === 0 && expenses.length === 0;
   const body = nothing
     ? renderEmpty()
     : `
-    ${renderOverview(stats, cashStats, lifeCostUsd)}
+    ${week ? renderWeek(week, rub) : ""}
+    ${month ? renderMonth(month, rub) : ""}
+    ${renderOverview(stats, cashStats, budgetUsd)}
     ${renderCashBreakdown(cashStats)}
     ${receipts.length > 0 ? renderStats(stats) : ""}
     ${renderCategoryTable(stats.foodCategories, "🍽 Рацион семьи", stats.foodUsd, "Доли внутри продуктовых трат — что семья реально ест, в деньгах.")}
@@ -702,7 +951,14 @@ export function renderReceiptsPage(
     }
     button:hover { background: #66bb6a; }
     button:disabled { background: #3a3f4d; color: #888; cursor: default; }
-    @media (max-width: 700px) { ul[style*="columns"] { columns: 1 !important; } }
+    @media (max-width: 700px) {
+      ul[style*="columns"] { columns: 1 !important; }
+      body { padding: 10px; }
+      .section { padding: 14px; }
+      th, td { padding: 7px 7px; }
+    }
+    /* Wide tables scroll inside their own card instead of stretching the page on a phone. */
+    .section { overflow-x: auto; }
   </style>
 </head>
 <body>
@@ -710,9 +966,10 @@ export function renderReceiptsPage(
     <header>
       <h1>🧾 Траты и рацион</h1>
       <nav>
-        <a href="/">📈 Earn</a>
+        <a href="${config.earn.url}" title="Крипто-оптимизатор — отдельное приложение (npm run dev:earn)">📈 Earn</a>
         <a href="/finance">💼 Финансы</a>
         <a href="/receipts" class="active">🧾 Траты</a>
+        <a href="/shopping">🛒 Списки</a>
       </nav>
     </header>
     ${renderQuickAdd(presets)}

@@ -3,16 +3,15 @@ import { config } from "../config/index.js";
 import { logger } from "../utils/logger.js";
 import { loadState, saveState } from "../state/index.js";
 import { optimize } from "../optimizer/index.js";
-import { takeSnapshotIfDue } from "../finance/snapshots.js";
+import { sendMessage } from "../telegram/send.js";
 import {
-  sendMessage,
   formatOptimizationReport,
   formatHighApyReport,
   formatVolatileAlert,
-} from "../telegram/index.js";
+} from "../telegram/earn-reports.js";
 import type { IExchangeAdapter } from "../exchanges/IExchangeAdapter.js";
 
-export function startScheduler(adapters: IExchangeAdapter[]): {
+export function startEarnScheduler(adapters: IExchangeAdapter[]): {
   runCheck: () => Promise<void>;
 } {
   const stablecoins = config.optimizer.stablecoinAssets;
@@ -191,16 +190,6 @@ export function startScheduler(adapters: IExchangeAdapter[]): {
   cron.schedule(config.scheduler.checkCron, runCheck);
   cron.schedule(config.scheduler.reportCron, runDailyReport);
 
-  // Daily check that triggers a finance snapshot if last one is >= 7 days old.
-  cron.schedule("0 8 * * *", () => {
-    try {
-      const snap = takeSnapshotIfDue(7);
-      if (snap) logger.info(`[Scheduler] Weekly finance snapshot taken: ${snap.date}`);
-    } catch (err) {
-      logger.error("[Scheduler] Snapshot failed", err);
-    }
-  });
-
   if (config.volatile.enabled) {
     cron.schedule(config.volatile.priceCheckCron, runPriceCheck);
     logger.info(
@@ -214,11 +203,6 @@ export function startScheduler(adapters: IExchangeAdapter[]): {
 
   // Run immediately on startup
   runCheck();
-  try {
-    takeSnapshotIfDue(7);
-  } catch (err) {
-    logger.error("[Scheduler] Initial snapshot failed", err);
-  }
 
   return { runCheck };
 }

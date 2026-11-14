@@ -9,14 +9,111 @@ export interface CreditEntry {
   id: string;
   name: string;
   currency: string;
+  /** Principal left. Each marked payment lowers it by its principal part (see creditPrincipal). */
   balance: number;
+  /** YYYY-MM-DD — when balance was last set from the lender's own figure. */
+  balanceAsOf?: string;
   monthlyPayment: number;
   aprPct: number;
   priority: number;
   note?: string;
+  /** Day of month the payment is due (1–31; clamped to short months). */
+  paymentDay?: number;
+  /** Missed payment(s). The lender's figure grows daily, so it's an estimate from asOf. */
+  overdue?: CreditOverdue;
+  /** One month's payment differs from the usual (an overpayment credited, a penalty). */
+  paymentOverride?: { period: string; amount: number; note?: string };
+}
+
+/** What's due for a credit in a given month (YYYY-MM). */
+export function dueAmount(c: CreditEntry, period: string): number {
+  return c.paymentOverride?.period === period ? c.paymentOverride.amount : c.monthlyPayment;
+}
+
+export interface CreditOverdue {
+  /** Amount the lender reported on asOf. */
+  amount: number;
+  asOf: string;
+  /** How fast the figure grows (accrued interest / next instalment). */
+  growthPerDay?: number;
+  /** Date of the missed payment. */
+  since?: string;
+  note?: string;
+}
+
+/**
+ * One thing that happened to the family's money, recorded from the bot.
+ * `prev` keeps whatever the action replaced, so it can be undone exactly.
+ */
+export interface LedgerEntry {
+  id: string;
+  /** YYYY-MM-DD */
+  date: string;
+  kind:
+    | "debt-paid"
+    | "debt-partial"
+    | "debt-added"
+    | "income"
+    | "credit-payment"
+    | "overdue-paid"
+    | "bill-paid"
+    | "credit-balance";
+  /** Debt id / income id / credit id. */
+  ref: string;
+  label: string;
+  amount?: number;
+  currency?: string;
+  /** YYYY-MM the income or payment belongs to. */
+  period?: string;
+  by?: string;
+  prev?: unknown;
+  /** Credit balance before a payment lowered it — restored on undo. */
+  prevBalance?: number;
+}
+
+/**
+ * A recurring inflow. Most of them land in a window rather than on one day
+ * (benefits 5–7, salary mid-month), so the schedule shows a range.
+ */
+export interface IncomeEntry {
+  id: string;
+  name: string;
+  amount: number;
+  currency: string;
+  dayFrom: number;
+  dayTo: number;
+  /** What this money is earmarked for this month — free text, edited by hand. */
+  plan?: string;
+  note?: string;
+}
+
+/**
+ * A regular or one-off household payment: kids' trainings, utilities, rent,
+ * tuition, kindergarten funds. Not a debt to a person, not a credit.
+ */
+export interface Bill {
+  id: string;
+  name: string;
+  amount: number;
+  currency: string;
+  every: "month" | "year" | "once";
+  /** Day of month it's due (month / year). Unknown → shown as «дата ?», no reminder. */
+  day?: number;
+  /** Month 1–12 for yearly bills. */
+  month?: number;
+  /** Deadline for one-off bills, YYYY-MM-DD. */
+  dueDate?: string;
+  /**
+   * Already part of monthlyLifeCostUsd (rent, utilities…): shown and reminded,
+   * but the month plan doesn't subtract it a second time.
+   */
+  inLifeCost?: boolean;
+  note?: string;
 }
 
 export interface PersonalDebt {
+  /** Stable id for bot buttons; assigned on first use. */
+  id?: string;
   name: string;
   amountUsd: number;
   currency: string;
@@ -54,6 +151,19 @@ export interface Milestone {
   id: string;
   label: string;
   done: boolean;
+  note?: string;
+  /** Heading the milestone is listed under ("1. Долги"…). */
+  stage?: string;
+  /** Fixed target month, YYYY-MM. */
+  target?: string;
+  /** Target = when the payoff plan closes the last of these (phase names, prefix match; "personal" = all people). */
+  planTargets?: string[];
+  /** Target = debt-free month + this many months. */
+  afterDebtsMonths?: number;
+  /** Target = when capital, saved from the debt-free month, reaches this. */
+  capitalUsd?: number;
+  /** Target = when a month's interest reaches the monthly contribution. */
+  capitalRule?: "crossover";
 }
 
 export interface FinanceData {
@@ -61,15 +171,39 @@ export interface FinanceData {
   mdlPerUsd: number;
   /** Transnistrian rouble per USD — receipts from ПМР shops are priced in it. */
   rubPerUsd?: number;
+  /** USD per 1 EUR (BNM cross rate). */
+  usdPerEur?: number;
+  /** When and from where the rates above were last fetched automatically. */
+  ratesUpdatedAt?: string;
+  ratesSource?: string;
   monthlyIncomeUsd: number;
   monthlyLifeCostUsd: number;
+  /**
+   * The part of monthlyLifeCostUsd that receipts and cash entries can actually
+   * see (food, household, clothes). Rent, utilities and phones never show up
+   * in the spending tracker, so comparing it against the full life cost would
+   * always look like under-spending.
+   */
+  monthlyVariableBudgetUsd?: number;
   passiveIncomeGoalUsdPerMonth: number;
+  /** YYYY-MM-DD — the capital calculator shows "by 40 / 45 / 50…" from it. */
+  birthDate?: string;
+  /** Cash and cards in hand, in USD, as told on cashAsOf — anchors "what's left this month". */
+  cashOnHandUsd?: number;
+  /** YYYY-MM-DD */
+  cashAsOf?: string;
+  /** Expected inflows by day of month — drives the "📆 Ближайшее" calendar. */
+  incomeSchedule?: IncomeEntry[];
   credits: CreditEntry[];
   personalDebts: PersonalDebt[];
   owedToMe: OwedToMe[];
   liquidAssets: LiquidAsset[];
   earmarks: Earmark[];
   milestones: Milestone[];
+  /** Regular and one-off household payments (🧾 Платежи in the bot). */
+  bills?: Bill[];
+  /** Payments, incomes and debt changes recorded from the bot, newest last. */
+  ledger?: LedgerEntry[];
 }
 
 export interface CreditWithMetrics extends CreditEntry {
@@ -137,9 +271,9 @@ export function saveFinance(data: FinanceData): void {
   }
 }
 
-function toUsd(amount: number, currency: string, mdlPerUsd: number): number {
+function toUsd(amount: number, currency: string, mdlPerUsd: number, usdPerEur = 1.08): number {
   if (currency === "USD") return amount;
-  if (currency === "EUR") return amount * 1.08;
+  if (currency === "EUR") return amount * usdPerEur;
   if (currency === "MDL") return amount / mdlPerUsd;
   return amount;
 }
@@ -151,11 +285,11 @@ export function computeMetrics(
   const rate = data.mdlPerUsd;
 
   const credits: CreditWithMetrics[] = data.credits.map((c) => {
-    const balanceUsd = toUsd(c.balance, c.currency, rate);
-    const monthlyPaymentUsd = toUsd(c.monthlyPayment, c.currency, rate);
+    const balanceUsd = toUsd(c.balance, c.currency, rate, data.usdPerEur);
+    const monthlyPaymentUsd = toUsd(c.monthlyPayment, c.currency, rate, data.usdPerEur);
     const monthlyRate = c.aprPct / 100 / 12;
     const monthlyInterestNative = c.balance * monthlyRate;
-    const monthlyInterestUsd = toUsd(monthlyInterestNative, c.currency, rate);
+    const monthlyInterestUsd = toUsd(monthlyInterestNative, c.currency, rate, data.usdPerEur);
     const principalPerMonth = c.monthlyPayment - monthlyInterestNative;
     let monthsToPayoffMin: number | null = null;
     if (principalPerMonth > 0) {
@@ -322,7 +456,7 @@ function comparePersonalDebts(a: PersonalDebt, b: PersonalDebt): number {
 
 export interface AllocationStep {
   kind: AllocationKind;
-  target: string; // e.g. "EarnOptimizer" or "Credit365"
+  target: string; // e.g. "EarnOptimizer" or a credit's name
   amountUsd: number;
   reason: string;
   expectedReturnPct: number; // APR equivalent saved or earned
@@ -549,7 +683,7 @@ export function recommendAllocation(
     freeCashUsd + metrics.totalEarmarkedUsd > metrics.totalLiquidAssetsUsd
   ) {
     notes.push(
-      `⚠️ Не забудь: у тебя $${metrics.totalEarmarkedUsd.toFixed(0)} забронировано (Tesla, доставка). Не трать их.`,
+      `⚠️ Не забудь: у тебя $${metrics.totalEarmarkedUsd.toFixed(0)} забронировано под отложенные цели. Не трать их.`,
     );
   }
 
@@ -581,6 +715,8 @@ export interface PayoffPhase {
   monthsNeeded: number;
   startLabel: string;
   endLabel: string;
+  /** Month it closes, counted from the current month (0 = this month). */
+  endOffset: number;
   /** Monthly payment that stops once this is closed. 0 for personal debts. */
   freesUpUsd: number;
 }
@@ -635,7 +771,16 @@ function monthLabel(base: Date, offset: number): string {
  */
 export function buildPayoffPlan(
   metrics: FinanceMetrics,
-  opts: { startCashUsd?: number; from?: Date } = {},
+  opts: {
+    startCashUsd?: number;
+    from?: Date;
+    /**
+     * What's really free for debts in the current month (restOfMonth). Most
+     * of this month's income is usually spent already, so giving month 1 the
+     * full flow would close debts on paper that the wallet can't.
+     */
+    thisMonthUsd?: number;
+  } = {},
 ): PayoffPlan {
   const base = opts.from ?? new Date();
   let carry = Math.max(0, opts.startCashUsd ?? metrics.freeCashUsd);
@@ -722,6 +867,7 @@ export function buildPayoffPlan(
       monthsNeeded: endMonth - start + 1,
       startLabel: monthLabel(base, start - 1),
       endLabel: monthLabel(base, endMonth - 1),
+      endOffset: endMonth - 1,
       freesUpUsd: t.freesUpUsd,
     });
   };
@@ -741,7 +887,10 @@ export function buildPayoffPlan(
         if (c.balance <= 0.01) c.closed = true;
       }
 
-      let extra = baseFlow - minTotal + carry;
+      // Month 1 is the current one: its minimums are inside thisMonthUsd already.
+      let extra = month === 1 && opts.thisMonthUsd !== undefined
+        ? Math.max(0, opts.thisMonthUsd)
+        : baseFlow - minTotal + carry;
       carry = 0;
 
       while (extra > 0.01 && qi < queue.length) {
